@@ -32,7 +32,10 @@ export async function POST(request: NextRequest) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
-      { error: "Missing OPENAI_API_KEY" },
+      {
+        error:
+          "Missing OPENAI_API_KEY. On Vercel: Project → Settings → Environment Variables → add OPENAI_API_KEY, then Redeploy. Local .env.local is not deployed.",
+      },
       { status: 500 }
     );
   }

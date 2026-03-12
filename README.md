@@ -46,10 +46,11 @@ Repo: [jopzap90/conversational-phone-app](https://github.com/jopzap90/conversati
 1. **Vercel** → [vercel.com/new](https://vercel.com/new) → **Import Git Repository**.
 2. Conecte a conta **GitHub** se ainda não estiver conectada.
 3. Escolha **`jopzap90/conversational-phone-app`** → **Import**.
-4. **Environment Variables** (obrigatório antes do primeiro deploy que use a API):
-   - `OPENAI_API_KEY` = sua chave `sk-...` (mesma do `.env.local`).
-   - Opcional: `OPENAI_MODEL` = `gpt-4o-mini` (ou outro modelo compatível).
-5. **Deploy**. A Vercel detecta Next.js e roda `npm run build` sozinha.
+4. **Environment Variables** (obrigatório — **a Vercel não lê `.env.local`**; esse arquivo não sobe no Git):
+   - `OPENAI_API_KEY` = sua chave `sk-...` (cole no painel da Vercel).
+   - Opcional: `OPENAI_MODEL` = `gpt-4o-mini`.
+   - Marque para **Production** (e **Preview** se quiser).
+5. **Deploy**. Depois de adicionar a chave, faça **Redeploy** se já tiver deployado sem ela.
 
 ### Depois do deploy
 

@@ -13,7 +13,7 @@ function formatDuration(seconds: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-/** Simple two-tone ring using Web Audio (no external file). */
+/** Simple two-tone ring using Web Audio. Only start after user gesture (autoplay policy). */
 function useRinging(active: boolean) {
   const ctxRef = useRef<AudioContext | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -32,7 +32,11 @@ function useRinging(active: boolean) {
       stop();
       return;
     }
+    // Resume/create after gesture — if suspended, interval beeps still fail until resumed
     const ctx = new AudioContext();
+    if (ctx.state === "suspended") {
+      ctx.resume().catch(() => {});
+    }
     ctxRef.current = ctx;
 
     const beep = () => {
@@ -109,16 +113,22 @@ async function chatReply(
 }
 
 export default function AndroidCall() {
-  // Initialize synchronously so the incoming-call UI paints immediately (no "Carregando" flash or stuck state if useEffect is delayed).
-  const [caller, setCaller] = useState<Caller>(() => pickRandomCaller());
+  // Caller only after mount avoids hydration mismatch (React #418): server vs client random differed.
+  const [caller, setCaller] = useState<Caller | null>(null);
   const [phase, setPhase] = useState<Phase>("ringing");
   const [error, setError] = useState<string | null>(null);
   const [callSeconds, setCallSeconds] = useState(0);
   const [busy, setBusy] = useState(false);
+  /** Ring sound only after user gesture (tap) — satisfies AudioContext autoplay policy. */
+  const [ringUnlocked, setRingUnlocked] = useState(false);
   const messagesRef = useRef<Message[]>([]);
   const abortRef = useRef(false);
 
-  const stopRing = useRinging(phase === "ringing");
+  useEffect(() => {
+    setCaller(pickRandomCaller());
+  }, []);
+
+  const stopRing = useRinging(phase === "ringing" && ringUnlocked && caller !== null);
 
   // Call timer
   useEffect(() => {
@@ -135,8 +145,10 @@ export default function AndroidCall() {
     messagesRef.current = [];
   }, [stopRing]);
 
+  const unlockRing = useCallback(() => setRingUnlocked(true), []);
+
   const answer = useCallback(async () => {
-    if (busy) return;
+    if (!caller || busy) return;
     abortRef.current = false;
     setBusy(true);
     setError(null);
@@ -200,22 +212,35 @@ export default function AndroidCall() {
     setPhase("ringing");
     setCallSeconds(0);
     setError(null);
+    setRingUnlocked(false);
   }, []);
 
   // —— Android-style incoming call ——
   if (phase === "ringing") {
+    const c = caller;
     return (
-      <div className="flex min-h-screen flex-col bg-[#0d1117] text-white">
+      <div
+        className="flex min-h-screen flex-col bg-[#0d1117] text-white"
+        onPointerDown={unlockRing}
+        role="presentation"
+      >
         <div className="flex flex-1 flex-col items-center justify-center px-6">
           <div
             className={`mb-6 flex h-28 w-28 items-center justify-center rounded-full text-4xl font-medium text-white ${
-              caller.gender === "male" ? "bg-[#1a5f7a]" : "bg-[#7a1a5f]"
+              c?.gender === "male" ? "bg-[#1a5f7a]" : c ? "bg-[#7a1a5f]" : "bg-slate-600"
             }`}
           >
-            {caller.name[0]}
+            {c ? c.name[0] : "?"}
           </div>
-          <h1 className="text-2xl font-normal">{caller.name}</h1>
-          <p className="mt-2 text-sm text-white/60">Ligação recebida</p>
+          <h1 className="text-2xl font-normal">{c ? c.name : "Chamada"}</h1>
+          <p className="mt-2 text-sm text-white/60">
+            {c ? "Ligação recebida" : "Preparando…"}
+          </p>
+          {!ringUnlocked && c && (
+            <p className="mt-2 text-xs text-white/40">
+              Toque na tela para ativar o toque
+            </p>
+          )}
           {error && (
             <p className="mt-4 text-center text-sm text-red-400">{error}</p>
           )}
@@ -238,7 +263,7 @@ export default function AndroidCall() {
           <button
             type="button"
             onClick={answer}
-            disabled={busy}
+            disabled={busy || !c}
             className="flex h-14 w-14 items-center justify-center rounded-full bg-[#43a047] shadow-lg disabled:opacity-50"
             aria-label="Atender"
           >
@@ -272,6 +297,7 @@ export default function AndroidCall() {
   }
 
   // —— In-call (Android-style) ——
+  if (!caller) return null;
   return (
     <div className="flex min-h-screen flex-col bg-[#0d1117] text-white">
       <div className="flex flex-1 flex-col items-center justify-center px-6">

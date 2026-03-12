@@ -9,7 +9,10 @@ export async function POST(request: NextRequest) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
-      { error: "Missing OPENAI_API_KEY" },
+      {
+        error:
+          "Missing OPENAI_API_KEY. Add it in Vercel Environment Variables and redeploy.",
+      },
       { status: 500 }
     );
   }
