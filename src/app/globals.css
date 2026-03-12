@@ -24,3 +24,9 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Phone UI is full-screen dark; ensure base layer doesn’t stay white behind client tree */
+html,
+body {
+  min-height: 100%;
+}

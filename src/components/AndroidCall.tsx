@@ -1,0 +1,314 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { Caller } from "@/lib/callers";
+import { pickRandomCaller } from "@/lib/callers";
+
+type Message = { role: "user" | "assistant"; content: string };
+type Phase = "ringing" | "incall" | "ended";
+
+function formatDuration(seconds: number) {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+/** Simple two-tone ring using Web Audio (no external file). */
+function useRinging(active: boolean) {
+  const ctxRef = useRef<AudioContext | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stop = useCallback(() => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    ctxRef.current?.close().catch(() => {});
+    ctxRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    if (!active) {
+      stop();
+      return;
+    }
+    const ctx = new AudioContext();
+    ctxRef.current = ctx;
+
+    const beep = () => {
+      if (ctx.state === "closed") return;
+      const o1 = ctx.createOscillator();
+      const o2 = ctx.createOscillator();
+      const g = ctx.createGain();
+      o1.frequency.value = 440;
+      o2.frequency.value = 480;
+      o1.connect(g);
+      o2.connect(g);
+      g.connect(ctx.destination);
+      g.gain.value = 0.08;
+      o1.start();
+      o2.start();
+      o1.stop(ctx.currentTime + 0.15);
+      o2.stop(ctx.currentTime + 0.15);
+    };
+
+    beep();
+    intervalRef.current = setInterval(beep, 2200);
+
+    return stop;
+  }, [active, stop]);
+
+  return stop;
+}
+
+async function speakTts(text: string, voice: string): Promise<void> {
+  const res = await fetch("/api/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, voice }),
+  });
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}));
+    throw new Error((j as { error?: string }).error || "TTS failed");
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const audio = new Audio(url);
+      audio.onended = () => resolve();
+      audio.onerror = () => reject(new Error("Audio play failed"));
+      audio.play().catch(reject);
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function transcribeAudio(blob: Blob): Promise<string> {
+  const fd = new FormData();
+  fd.append("file", blob, "audio.webm");
+  const res = await fetch("/api/transcribe", { method: "POST", body: fd });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Transcribe failed");
+  return (data.text as string) || "";
+}
+
+async function chatReply(
+  messages: Message[],
+  caller: Caller
+): Promise<string> {
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, caller }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Chat failed");
+  return data.reply as string;
+}
+
+export default function AndroidCall() {
+  // Initialize synchronously so the incoming-call UI paints immediately (no "Carregando" flash or stuck state if useEffect is delayed).
+  const [caller, setCaller] = useState<Caller>(() => pickRandomCaller());
+  const [phase, setPhase] = useState<Phase>("ringing");
+  const [error, setError] = useState<string | null>(null);
+  const [callSeconds, setCallSeconds] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const messagesRef = useRef<Message[]>([]);
+  const abortRef = useRef(false);
+
+  const stopRing = useRinging(phase === "ringing");
+
+  // Call timer
+  useEffect(() => {
+    if (phase !== "incall") return;
+    const t = setInterval(() => setCallSeconds((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [phase]);
+
+  const hangUp = useCallback(() => {
+    abortRef.current = true;
+    stopRing();
+    setPhase("ended");
+    setBusy(false);
+    messagesRef.current = [];
+  }, [stopRing]);
+
+  const answer = useCallback(async () => {
+    if (busy) return;
+    abortRef.current = false;
+    setBusy(true);
+    setError(null);
+    stopRing();
+    setPhase("incall");
+    setCallSeconds(0);
+    messagesRef.current = [];
+
+    try {
+      // Opening line — model speaks first as the caller
+      const openingUser =
+        "(Acabei de atender. Você ligou. Diga uma saudação natural de ligação, bem curta, em português paulista.)";
+      messagesRef.current = [{ role: "user", content: openingUser }];
+      let reply = await chatReply(messagesRef.current, caller);
+      messagesRef.current.push({ role: "assistant", content: reply });
+      await speakTts(reply, caller.ttsVoice);
+
+      // Voice loop until hang up
+      while (!abortRef.current) {
+        setBusy(true);
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+        });
+        const rec = new MediaRecorder(stream, { mimeType: "audio/webm" });
+        const chunks: BlobPart[] = [];
+        rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+        rec.start();
+        await new Promise((r) => setTimeout(r, 5000));
+        rec.stop();
+        await new Promise<void>((r) => {
+          rec.onstop = () => r();
+        });
+        stream.getTracks().forEach((t) => t.stop());
+        if (abortRef.current) break;
+
+        const blob = new Blob(chunks, { type: "audio/webm" });
+        const text = await transcribeAudio(blob);
+        if (abortRef.current) break;
+        if (!text.trim()) continue;
+
+        messagesRef.current.push({ role: "user", content: text });
+        reply = await chatReply(messagesRef.current, caller);
+        if (abortRef.current) break;
+        messagesRef.current.push({ role: "assistant", content: reply });
+        await speakTts(reply, caller.ttsVoice);
+      }
+    } catch (e) {
+      if (!abortRef.current)
+        setError(e instanceof Error ? e.message : "Erro na ligação");
+    } finally {
+      setBusy(false);
+    }
+  }, [caller, busy, stopRing]);
+
+  const decline = useCallback(() => {
+    hangUp();
+  }, [hangUp]);
+
+  const newCall = useCallback(() => {
+    setCaller(pickRandomCaller());
+    setPhase("ringing");
+    setCallSeconds(0);
+    setError(null);
+  }, []);
+
+  // —— Android-style incoming call ——
+  if (phase === "ringing") {
+    return (
+      <div className="flex min-h-screen flex-col bg-[#0d1117] text-white">
+        <div className="flex flex-1 flex-col items-center justify-center px-6">
+          <div
+            className={`mb-6 flex h-28 w-28 items-center justify-center rounded-full text-4xl font-medium text-white ${
+              caller.gender === "male" ? "bg-[#1a5f7a]" : "bg-[#7a1a5f]"
+            }`}
+          >
+            {caller.name[0]}
+          </div>
+          <h1 className="text-2xl font-normal">{caller.name}</h1>
+          <p className="mt-2 text-sm text-white/60">Ligação recebida</p>
+          {error && (
+            <p className="mt-4 text-center text-sm text-red-400">{error}</p>
+          )}
+        </div>
+        <div className="flex items-center justify-center gap-16 pb-16 pt-8">
+          <button
+            type="button"
+            onClick={decline}
+            className="flex h-14 w-14 items-center justify-center rounded-full bg-[#e53935] shadow-lg"
+            aria-label="Recusar"
+          >
+            <svg
+              className="h-7 w-7 text-white"
+              fill="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08c-.18-.17-.29-.42-.29-.7 0-.28.11-.53.29-.71C3.34 8.78 7.29 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28-.79-.74-1.69-1.36-2.67-1.85-.33-.16-.56-.5-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            onClick={answer}
+            disabled={busy}
+            className="flex h-14 w-14 items-center justify-center rounded-full bg-[#43a047] shadow-lg disabled:opacity-50"
+            aria-label="Atender"
+          >
+            <svg
+              className="h-7 w-7 text-white"
+              fill="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56-.35-.12-.74-.03-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // —— Call ended ——
+  if (phase === "ended") {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-[#0d1117] px-6 text-white">
+        <p className="text-white/70">Ligação encerrada</p>
+        <button
+          type="button"
+          onClick={newCall}
+          className="mt-8 rounded-full bg-[#43a047] px-8 py-3 font-medium text-white"
+        >
+          Nova ligação
+        </button>
+      </div>
+    );
+  }
+
+  // —— In-call (Android-style) ——
+  return (
+    <div className="flex min-h-screen flex-col bg-[#0d1117] text-white">
+      <div className="flex flex-1 flex-col items-center justify-center px-6">
+        <div
+          className={`mb-6 flex h-24 w-24 items-center justify-center rounded-full text-3xl font-medium ${
+            caller.gender === "male" ? "bg-[#1a5f7a]" : "bg-[#7a1a5f]"
+          }`}
+        >
+          {caller.name[0]}
+        </div>
+        <h1 className="text-xl font-normal">{caller.name}</h1>
+        <p className="mt-2 font-mono text-sm text-white/60">
+          {formatDuration(callSeconds)}
+        </p>
+        {busy && (
+          <p className="mt-4 text-sm text-white/50">Ouvindo…</p>
+        )}
+        {error && (
+          <p className="mt-4 text-center text-sm text-red-400">{error}</p>
+        )}
+      </div>
+      <div className="flex justify-center pb-16 pt-8">
+        <button
+          type="button"
+          onClick={hangUp}
+          className="flex h-16 w-16 items-center justify-center rounded-full bg-[#e53935] shadow-lg"
+          aria-label="Desligar"
+        >
+          <svg
+            className="h-8 w-8 text-white"
+            fill="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08c-.18-.17-.29-.42-.29-.7 0-.28.11-.53.29-.71C3.34 8.78 7.29 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28-.79-.74-1.69-1.36-2.67-1.85-.33-.16-.56-.5-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}

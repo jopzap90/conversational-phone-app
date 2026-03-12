@@ -1,36 +1,36 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Phone AI Friend — Android call (voz only)
 
-## Getting Started
+Single flow: **open app → toca a ligação → atender → conversa por voz** em português (persona **paulista**). Quem liga é **aleatório** (nomes masculinos e femininos). **Desligar** encerra como num telefone.
 
-First, run the development server:
+## Setup
 
 ```bash
+npm install
+cp .env.example .env.local
+# OPENAI_API_KEY obrigatório (chat + Whisper + TTS)
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Fluxo
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+1. **Ligação recebida** — toque (Web Audio), tela estilo Android escura, avatar + nome aleatório.
+2. **Verde** atende — para o toque; a pessoa fala primeiro (TTS em PT).
+3. **Loop** — grava ~5s → Whisper (pt) → resposta → TTS; repete até desligar.
+4. **Vermelho** recusa ou desliga — tela “Ligação encerrada”; **Nova ligação** sorteia outro contato.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## APIs
 
-## Learn More
+| Rota            | Uso                          |
+|-----------------|------------------------------|
+| `POST /api/chat`| Histórico + persona do caller|
+| `POST /api/transcribe` | Whisper `language: pt` |
+| `POST /api/tts` | OpenAI TTS (voz por gênero)  |
 
-To learn more about Next.js, take a look at the following resources:
+## Accent / voz
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- **Paulista** está no *prompt* (cadência SP, sem exagero).
+- TTS OpenAI não tem controle fino de sotaque; o texto em PT-BR + voz `onyx`/`echo` (M) ou `nova`/`shimmer` (F) aproxima.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Stack
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Next.js, OpenAI (chat + whisper-1 + tts-1). Sem campo de texto.
