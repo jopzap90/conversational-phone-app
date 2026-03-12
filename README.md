@@ -34,3 +34,31 @@ npm run dev
 ## Stack
 
 Next.js, OpenAI (chat + whisper-1 + tts-1). Sem campo de texto.
+
+---
+
+## Deploy na Vercel (via GitHub)
+
+Repo: [jopzap90/conversational-phone-app](https://github.com/jopzap90/conversational-phone-app)
+
+### Passos
+
+1. **Vercel** → [vercel.com/new](https://vercel.com/new) → **Import Git Repository**.
+2. Conecte a conta **GitHub** se ainda não estiver conectada.
+3. Escolha **`jopzap90/conversational-phone-app`** → **Import**.
+4. **Environment Variables** (obrigatório antes do primeiro deploy que use a API):
+   - `OPENAI_API_KEY` = sua chave `sk-...` (mesma do `.env.local`).
+   - Opcional: `OPENAI_MODEL` = `gpt-4o-mini` (ou outro modelo compatível).
+5. **Deploy**. A Vercel detecta Next.js e roda `npm run build` sozinha.
+
+### Depois do deploy
+
+- Abra a URL `https://<projeto>.vercel.app` — o microfone só funciona em **HTTPS** (a Vercel já serve assim).
+- Cada push na branch ligada ao projeto (ex.: `main`) gera um **novo deploy** automaticamente.
+
+### Segurança
+
+- **Nunca** commite `.env.local`. Na Vercel as variáveis ficam só no painel (**Settings → Environment Variables**).
+- Se a chave vazar, revogue em [OpenAI API keys](https://platform.openai.com/api-keys) e crie outra.
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/jopzap90/conversational-phone-app)
