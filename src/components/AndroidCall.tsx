@@ -4,6 +4,64 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Caller } from "@/lib/callers";
 import { pickRandomCaller } from "@/lib/callers";
 
+// #region agent log
+const eventBufferRef = { current: [] as string[] };
+const DEBUG_LOG = (
+  message: string,
+  data: Record<string, unknown> & { hypothesisId?: string }
+) => {
+  const entry = `${message} ${JSON.stringify(data)}`;
+  eventBufferRef.current = [...eventBufferRef.current.slice(-4), entry];
+  const hypothesisId = data.hypothesisId || "unknown";
+  if (typeof window !== "undefined") {
+    // #region server fallback (writes to local NDJSON file)
+    fetch("/api/client-log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "9b2c32",
+        runId: "pre-mobile",
+        hypothesisId,
+        location: "AndroidCall.tsx",
+        message,
+        data: {
+          ...data,
+          userAgent:
+            typeof navigator !== "undefined"
+              ? navigator.userAgent.slice(0, 80)
+              : "",
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
+    fetch(
+      "http://127.0.0.1:7625/ingest/eb0e6ea3-571e-43ca-b6ad-ffedc9fab7d9",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "9b2c32",
+        },
+        body: JSON.stringify({
+          sessionId: "9b2c32",
+          location: "AndroidCall.tsx",
+          message,
+          data: {
+            ...data,
+            userAgent:
+              typeof navigator !== "undefined"
+                ? navigator.userAgent.slice(0, 80)
+                : "",
+          },
+          timestamp: Date.now(),
+        }),
+      }
+    ).catch(() => {});
+  }
+};
+// #endregion
+
 type Message = { role: "user" | "assistant"; content: string };
 type Phase = "ringing" | "incall" | "ended";
 
@@ -128,6 +186,22 @@ export default function AndroidCall() {
     setCaller(pickRandomCaller());
   }, []);
 
+  // Log visibility changes during call (mobile often hides page when phone to ear)
+  useEffect(() => {
+    if (phase !== "incall" || typeof document === "undefined") return;
+    const onVisibility = () => {
+      // #region agent log
+      DEBUG_LOG("visibility change", {
+        hypothesisId: "H5",
+        visibility: document.visibilityState,
+        phase,
+      });
+      // #endregion
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [phase]);
+
   const stopRing = useRinging(phase === "ringing" && ringUnlocked && caller !== null);
 
   // Call timer
@@ -138,12 +212,15 @@ export default function AndroidCall() {
   }, [phase]);
 
   const hangUp = useCallback(() => {
+    // #region agent log
+    DEBUG_LOG("hangUp called", { hypothesisId: "H1", phase });
+    // #endregion
     abortRef.current = true;
     stopRing();
     setPhase("ended");
     setBusy(false);
     messagesRef.current = [];
-  }, [stopRing]);
+  }, [stopRing, phase]);
 
   const unlockRing = useCallback(() => setRingUnlocked(true), []);
 
@@ -165,26 +242,83 @@ export default function AndroidCall() {
       let reply = await chatReply(messagesRef.current, caller);
       messagesRef.current.push({ role: "assistant", content: reply });
       await speakTts(reply, caller.ttsVoice);
+      // #region agent log
+      DEBUG_LOG("opening TTS done, entering loop", { hypothesisId: "H3" });
+      // #endregion
 
       // Voice loop until hang up
+      let loopCount = 0;
       while (!abortRef.current) {
+        loopCount += 1;
+        // #region agent log
+        DEBUG_LOG("voice loop iteration start", {
+          hypothesisId: "H4",
+          loopCount,
+          visibility: typeof document !== "undefined" ? document.visibilityState : "",
+        });
+        // #endregion
         setBusy(true);
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-        });
-        const rec = new MediaRecorder(stream, { mimeType: "audio/webm" });
-        const chunks: BlobPart[] = [];
-        rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-        rec.start();
-        await new Promise((r) => setTimeout(r, 5000));
-        rec.stop();
-        await new Promise<void>((r) => {
-          rec.onstop = () => r();
-        });
-        stream.getTracks().forEach((t) => t.stop());
+        let stream: MediaStream | null = null;
+        let recorder: MediaRecorder | null = null;
+        let chunks: BlobPart[] = [];
+        let blobType = "audio/webm";
+
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+          });
+
+          // Some mobile browsers don't support `audio/webm` consistently; fall back to
+          // MediaRecorder defaults when needed.
+          const preferredMimeType = "audio/webm";
+          const canUseWebm =
+            typeof MediaRecorder !== "undefined" &&
+            typeof MediaRecorder.isTypeSupported === "function" &&
+            MediaRecorder.isTypeSupported(preferredMimeType);
+
+          recorder = new MediaRecorder(
+            stream,
+            canUseWebm ? { mimeType: preferredMimeType } : undefined
+          );
+          blobType = recorder.mimeType || blobType;
+
+          recorder.ondataavailable = (e) => {
+            if (e.data && e.data.size) chunks.push(e.data);
+          };
+
+          // Critical: attach `onstop` before calling `stop()`, otherwise some mobile
+          // browsers can fire `stop` before the handler is registered (leading to a hang).
+          const stopPromise = new Promise<void>((resolve, reject) => {
+            recorder!.onstop = () => resolve();
+            recorder!.onerror = () =>
+              reject(recorder?.error ?? new Error("MediaRecorder error"));
+          });
+
+          recorder.start();
+          await new Promise((r) => setTimeout(r, 5000));
+
+          try {
+            recorder.stop();
+          } catch {
+            // We'll still fail via the safety timeout below if needed.
+          }
+
+          await Promise.race([
+            stopPromise,
+            new Promise<void>((_, reject) =>
+              setTimeout(
+                () => reject(new Error("Recording timeout")),
+                7000
+              )
+            ),
+          ]);
+        } finally {
+          stream?.getTracks().forEach((t) => t.stop());
+        }
+
         if (abortRef.current) break;
 
-        const blob = new Blob(chunks, { type: "audio/webm" });
+        const blob = new Blob(chunks, { type: blobType });
         const text = await transcribeAudio(blob);
         if (abortRef.current) break;
         if (!text.trim()) continue;
@@ -196,8 +330,22 @@ export default function AndroidCall() {
         await speakTts(reply, caller.ttsVoice);
       }
     } catch (e) {
-      if (!abortRef.current)
-        setError(e instanceof Error ? e.message : "Erro na ligação");
+      // #region agent log
+      DEBUG_LOG("answer() catch", {
+        hypothesisId: "H2",
+        errMessage: e instanceof Error ? e.message : String(e),
+        errName: e instanceof Error ? e.name : "",
+        abortCurrent: abortRef.current,
+      });
+      // #endregion
+      if (!abortRef.current) {
+        const msg = e instanceof Error ? e.message : "Erro na ligação";
+        const trail =
+          eventBufferRef.current.length > 0
+            ? ` [últimos: ${eventBufferRef.current.join(" | ")}]`
+            : "";
+        setError(msg + trail);
+      }
     } finally {
       setBusy(false);
     }
