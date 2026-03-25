@@ -234,13 +234,16 @@ export default function AndroidCall() {
     setCallSeconds(0);
     messagesRef.current = [];
 
+    let stage = "answer:start";
     try {
       // Opening line — model speaks first as the caller
       const openingUser =
         "(Acabei de atender. Você ligou. Diga uma saudação natural de ligação, bem curta, em português paulista.)";
       messagesRef.current = [{ role: "user", content: openingUser }];
+      stage = "opening:chatReply";
       let reply = await chatReply(messagesRef.current, caller);
       messagesRef.current.push({ role: "assistant", content: reply });
+      stage = "opening:speakTts";
       await speakTts(reply, caller.ttsVoice);
       // #region agent log
       DEBUG_LOG("opening TTS done, entering loop", { hypothesisId: "H3" });
@@ -250,6 +253,7 @@ export default function AndroidCall() {
       let loopCount = 0;
       while (!abortRef.current) {
         loopCount += 1;
+        stage = `voice:loopStart:${loopCount}`;
         // #region agent log
         DEBUG_LOG("voice loop iteration start", {
           hypothesisId: "H4",
@@ -264,9 +268,11 @@ export default function AndroidCall() {
         let blobType = "audio/webm";
 
         try {
+          stage = "voice:getUserMedia";
           stream = await navigator.mediaDevices.getUserMedia({
             audio: true,
           });
+          stage = "voice:setupRecorder";
 
           // Some mobile browsers don't support `audio/webm` consistently; fall back to
           // MediaRecorder defaults when needed.
@@ -295,6 +301,7 @@ export default function AndroidCall() {
           });
 
           recorder.start();
+          stage = "voice:recording";
           await new Promise((r) => setTimeout(r, 5000));
 
           try {
@@ -319,14 +326,17 @@ export default function AndroidCall() {
         if (abortRef.current) break;
 
         const blob = new Blob(chunks, { type: blobType });
+        stage = "voice:transcribe";
         const text = await transcribeAudio(blob);
         if (abortRef.current) break;
         if (!text.trim()) continue;
 
         messagesRef.current.push({ role: "user", content: text });
+        stage = "voice:chatReply";
         reply = await chatReply(messagesRef.current, caller);
         if (abortRef.current) break;
         messagesRef.current.push({ role: "assistant", content: reply });
+        stage = "voice:speakTts";
         await speakTts(reply, caller.ttsVoice);
       }
     } catch (e) {
@@ -344,7 +354,7 @@ export default function AndroidCall() {
           eventBufferRef.current.length > 0
             ? ` [últimos: ${eventBufferRef.current.join(" | ")}]`
             : "";
-        setError(msg + trail);
+        setError(`${msg} (stage: ${stage})${trail}`);
       }
     } finally {
       setBusy(false);
